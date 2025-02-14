@@ -1,0 +1,9 @@
+apiVersion: apps.example.com/v1
+kind: PotApplication
+metadata:
+  labels:
+    app.kubernetes.io/name: pot-app-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: potapplication-sample
+spec:
+  # TODO(user): Add fields here

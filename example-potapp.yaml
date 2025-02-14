@@ -1,0 +1,7 @@
+apiVersion: apps.example.com/v1
+kind: PotApplication
+metadata:
+  name: my-first-potapp # You can choose any name here
+spec:
+  replicas: 3
+  image: "nginx:latest"
