@@ -21,23 +21,25 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/mortada-codes/pot-app-operator/api/v1"
+	"github.com/mortada-codes/pot-app-operator/internal/resourceBuilder"
 
 	appsv2 "k8s.io/api/apps/v1" // Import for Deployment
 	corev1 "k8s.io/api/core/v1" // Import for Pod/Container/Ports
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1" // Import for ObjectMeta
+	// Import for ObjectMeta
 )
 
 // PotApplicationReconciler reconciles a PotApplication object
 type PotApplicationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	resourceBuilder resourceBuilder.ResourceBuilder
 }
 
 // +kubebuilder:rbac:groups=apps.example.com,resources=potapplications,verbs=get;list;watch;create;update;patch;delete
@@ -70,7 +72,20 @@ func (r *PotApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	deployment := r.desiredDeployment(&potApp)
+	deployment := r.resourceBuilder.BuildDeployment(&potApp)
+	service := r.resourceBuilder.BuildService(&potApp)
+
+
+	if err := ctrl.SetControllerReference(&potApp, deployment, r.Scheme); err != nil {
+		log.Error(err, "Failed to set controller reference on Deployment")
+		return ctrl.Result{}, err
+	}
+	if err := ctrl.SetControllerReference(&potApp, service, r.Scheme); err != nil {
+		log.Error(err, "Failed to set controller reference on Service")
+		return ctrl.Result{}, err
+	}
+
+
 
 	foundDeployment := &appsv2.Deployment{}
 	err := r.Get(ctx, types.NamespacedName{
@@ -92,10 +107,17 @@ func (r *PotApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	service, err := r.constructService(&potApp)
-	if err != nil {
-		log.Error(err, "Failed to construct service")
-		return ctrl.Result{}, err
+	if !equality.Semantic.DeepEqual(deployment.Spec, foundDeployment.Spec) {
+		log.Info("Deployment spec is different. Updating Deployment")
+		updatedDeployment := foundDeployment.DeepCopy()
+		updatedDeployment.Spec = deployment.Spec
+		err = r.Update(ctx, updatedDeployment)
+		if err != nil {
+			log.Error(err, "Failed to update Deployment")
+			return ctrl.Result{}, err
+		}
+		log.Info("Deployment spec updated successfully", "deploymentName", deployment.Name)
+		return ctrl.Result{Requeue: true}, nil
 	}
 	
 	foundService := &corev1.Service{}
@@ -119,88 +141,30 @@ func (r *PotApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
+	if !equality.Semantic.DeepEqual(service.Spec, foundService.Spec) {
+		log.Info("Service spec is different. Updating Service")
+		updatedService := foundService.DeepCopy()
+		updatedService.Spec = service.Spec
+		err = r.Update(ctx, updatedService)
+		if err != nil {
+			log.Error(err, "Failed to update Service")
+			return ctrl.Result{}, err
+		}
+		log.Info("Service spec updated successfully", "serviceName", service.Name)
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	log.Info("Deployment already exists", "deployment", foundDeployment)
 	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PotApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.resourceBuilder = resourceBuilder.NewResourceBuilder(r.Client, r.Scheme)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.PotApplication{}).
 		Named("potapplication").
 		Complete(r)
-}
-
-func (r *PotApplicationReconciler) desiredDeployment(potApp *appsv1.PotApplication) *appsv2.Deployment {
-
-	int32Ptr := func(i int32) *int32 {
-		val := i    
-		return &val 
-	}
-	deployment := &appsv2.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      potApp.Name,
-			Namespace: potApp.Namespace,
-		},
-		Spec: appsv2.DeploymentSpec{
-			Replicas: int32Ptr(potApp.Spec.Replicas), 
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": potApp.Name, 
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app": potApp.Name, 
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "web", 
-							Image: potApp.Spec.Image, 
-							Ports: []corev1.ContainerPort{
-								{
-									ContainerPort: 80, 
-									Name: "http",
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	ctrl.SetControllerReference(potApp, deployment, r.Scheme)
-	return deployment
-}
-
-
-func (r *PotApplicationReconciler) constructService(potApp *appsv1.PotApplication) (*corev1.Service, error) {
-	
-	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      potApp.Name + "-service", 
-			Namespace: potApp.Namespace,
-			Labels:    potApp.Labels, 
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: potApp.Labels, 
-			Ports: []corev1.ServicePort{
-				{
-					Protocol:   corev1.ProtocolTCP,
-					Port:       80,        
-					TargetPort: intstr.FromInt(8080), 
-					NodePort:   30080,     
-				},
-			},
-			Type: corev1.ServiceTypeNodePort, 
-		},
-	}
-
-	// Set PotApplication instance as the owner and controller of the Service
-	ctrl.SetControllerReference(potApp, service, r.Scheme)
-	return service, nil
 }
 
